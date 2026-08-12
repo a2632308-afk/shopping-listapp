@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>쇼핑 리스트</title>
 <style>
   :root {
@@ -13,6 +14,7 @@
     --border: #e3e5e8;
     --accent: #2f6feb;
     --danger: #d94a45;
+    --warn-bg: #fdf2f2;
     --shadow: 0 1px 3px rgba(0,0,0,.08), 0 8px 24px rgba(0,0,0,.06);
   }
   @media (prefers-color-scheme: dark) {
@@ -24,6 +26,7 @@
       --border: #2e3237;
       --accent: #6a9bff;
       --danger: #ef6f6a;
+      --warn-bg: #2b1e1e;
       --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
     }
   }
@@ -56,6 +59,15 @@
   }
   h1 { margin: 0 0 4px; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
   .summary { margin: 0; font-size: 14px; color: var(--muted); }
+
+  #status {
+    padding: 11px 24px;
+    font-size: 14px;
+    color: var(--danger);
+    background: var(--warn-bg);
+    border-bottom: 1px solid var(--border);
+  }
+  #status[hidden] { display: none; }
 
   form {
     display: flex;
@@ -91,8 +103,9 @@
     border-radius: 8px;
     cursor: pointer;
   }
-  #add:hover { filter: brightness(1.08); }
-  #add:active { transform: translateY(1px); }
+  #add:hover:not(:disabled) { filter: brightness(1.08); }
+  #add:active:not(:disabled) { transform: translateY(1px); }
+  #input:disabled, #add:disabled { opacity: .55; cursor: not-allowed; }
 
   ul { list-style: none; margin: 0; padding: 0; }
 
@@ -145,6 +158,7 @@
     color: var(--muted);
     font-size: 15px;
   }
+  .empty[hidden] { display: none; }
 
   footer {
     display: flex;
@@ -171,149 +185,246 @@
 <div class="app">
   <header>
     <h1>🛒 쇼핑 리스트</h1>
-    <p class="summary" id="summary">항목이 없습니다</p>
+    <p class="summary" id="summary">불러오는 중…</p>
   </header>
 
+  <p id="status" role="alert" hidden></p>
+
   <form id="form">
-    <input id="input" type="text" placeholder="살 것을 입력하세요" autocomplete="off" maxlength="100" autofocus>
-    <button id="add" type="submit">추가</button>
+    <input id="input" type="text" placeholder="살 것을 입력하세요" autocomplete="off" maxlength="100" disabled>
+    <button id="add" type="submit" disabled>추가</button>
   </form>
 
   <ul id="list"></ul>
-  <p class="empty" id="empty">아직 담은 항목이 없습니다.<br>위에 입력해서 추가해 보세요.</p>
+  <p class="empty" id="empty" hidden>아직 담은 항목이 없습니다.<br>위에 입력해서 추가해 보세요.</p>
 
   <footer id="footer" hidden>
     <button id="clear" type="button">완료 항목 비우기</button>
   </footer>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-(function () {
+(() => {
   "use strict";
 
-  var STORAGE_KEY = "shopping-list.items";
+  // 브라우저에 공개되는 값입니다. RLS 정책으로 본인 항목만 접근하도록 제한되어 있으므로
+  // 저장소에 그대로 올려도 안전합니다. service_role / secret 키는 절대 여기에 두지 마세요.
+  const SUPABASE_URL = "https://hvrofcblxmnnpremmlcj.supabase.co";
+  const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_epj5HlVT60MS1m-4NtBLqw_y_46oody";
 
-  var form    = document.getElementById("form");
-  var input   = document.getElementById("input");
-  var list    = document.getElementById("list");
-  var empty   = document.getElementById("empty");
-  var footer  = document.getElementById("footer");
-  var summary = document.getElementById("summary");
-  var clearBtn = document.getElementById("clear");
+  const TABLE = "shopping_items";
+  const LEGACY_KEY = "shopping-list.items";   // 예전 localStorage 저장 위치
+  const MIGRATED_KEY = "shopping-list.migrated";
 
-  var items = load();
+  const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
-  function load() {
-    try {
-      var raw = localStorage.getItem(STORAGE_KEY);
-      var parsed = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(parsed)) return [];
-      // 저장된 데이터가 손상된 경우를 대비해 형태를 검증한다.
-      return parsed.filter(function (it) {
-        return it && typeof it.name === "string" && typeof it.id === "string";
-      }).map(function (it) {
-        return { id: it.id, name: it.name, done: it.done === true };
-      });
-    } catch (e) {
-      return [];
-    }
+  const form = document.getElementById("form");
+  const input = document.getElementById("input");
+  const addBtn = document.getElementById("add");
+  const list = document.getElementById("list");
+  const empty = document.getElementById("empty");
+  const footer = document.getElementById("footer");
+  const summary = document.getElementById("summary");
+  const status = document.getElementById("status");
+  const clearBtn = document.getElementById("clear");
+
+  let items = [];
+  let ready = false;
+
+  function showError(message) {
+    status.textContent = message;
+    status.hidden = false;
   }
 
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-    } catch (e) {
-      // 저장 실패(용량 초과, 파일 프로토콜 제한 등)해도 화면 동작은 유지한다.
-    }
+  function clearError() {
+    status.hidden = true;
   }
 
-  function newId() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  function setEnabled(on) {
+    ready = on;
+    input.disabled = !on;
+    addBtn.disabled = !on;
   }
 
   function render() {
     list.textContent = "";
 
-    items.forEach(function (item) {
-      var li = document.createElement("li");
+    for (const item of items) {
+      const li = document.createElement("li");
       if (item.done) li.className = "done";
       li.dataset.id = item.id;
 
-      var check = document.createElement("input");
+      const check = document.createElement("input");
       check.type = "checkbox";
       check.checked = item.done;
-      check.setAttribute("aria-label", item.name + " 완료 표시");
+      check.setAttribute("aria-label", `${item.name} 완료 표시`);
 
-      var name = document.createElement("span");
+      const name = document.createElement("span");
       name.className = "name";
       name.textContent = item.name;
 
-      var del = document.createElement("button");
+      const del = document.createElement("button");
       del.type = "button";
       del.className = "delete";
       del.textContent = "×";
       del.title = "삭제";
-      del.setAttribute("aria-label", item.name + " 삭제");
+      del.setAttribute("aria-label", `${item.name} 삭제`);
 
       li.append(check, name, del);
       list.append(li);
-    });
+    }
 
-    var done = items.filter(function (i) { return i.done; }).length;
-    var total = items.length;
+    const done = items.filter((i) => i.done).length;
+    const total = items.length;
 
-    empty.hidden = total > 0;
+    empty.hidden = total > 0 || !ready;
     footer.hidden = done === 0;
     summary.textContent = total === 0
       ? "항목이 없습니다"
-      : "전체 " + total + "개 · 담음 " + done + "개 · 남음 " + (total - done) + "개";
+      : `전체 ${total}개 · 담음 ${done}개 · 남음 ${total - done}개`;
   }
 
-  function find(id) {
-    for (var i = 0; i < items.length; i++) {
-      if (items[i].id === id) return items[i];
+  async function fetchItems() {
+    const { data, error } = await db
+      .from(TABLE)
+      .select("id, name, done")
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+    items = data;
+  }
+
+  // 예전 버전에서 localStorage 에 쌓여 있던 항목을 최초 1회만 쐰긴다.
+  async function migrateLegacyItems() {
+    let legacy;
+    try {
+      if (localStorage.getItem(MIGRATED_KEY)) return;
+      legacy = JSON.parse(localStorage.getItem(LEGACY_KEY) || "[]");
+    } catch {
+      return;
     }
-    return null;
+    if (!Array.isArray(legacy)) return;
+
+    const rows = legacy
+      .filter((it) => it && typeof it.name === "string" && it.name.trim())
+      .map((it) => ({ name: it.name.trim().slice(0, 100), done: it.done === true }));
+
+    if (rows.length) {
+      const { error } = await db.from(TABLE).insert(rows);
+      if (error) throw error;
+    }
+    localStorage.setItem(MIGRATED_KEY, "1");
   }
 
-  form.addEventListener("submit", function (e) {
-    e.preventDefault();
-    var name = input.value.trim();
-    if (!name) return;
+  async function start() {
+    try {
+      const { data: { session } } = await db.auth.getSession();
+      if (!session) {
+        const { error } = await db.auth.signInAnonymously();
+        if (error) throw error;
+      }
 
-    items.push({ id: newId(), name: name, done: false });
+      await migrateLegacyItems();
+      await fetchItems();
+
+      setEnabled(true);
+      clearError();
+      render();
+      input.focus();
+    } catch (err) {
+      setEnabled(false);
+      summary.textContent = "연결할 수 없습니다";
+      showError(`서버에 연결하지 못했습니다: ${err.message ?? err}`);
+    }
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = input.value.trim();
+    if (!name || !ready) return;
+
     input.value = "";
     input.focus();
-    save();
-    render();
-  });
 
-  list.addEventListener("click", function (e) {
-    var li = e.target.closest("li");
-    if (!li) return;
+    const { data, error } = await db
+      .from(TABLE)
+      .insert({ name })
+      .select("id, name, done")
+      .single();
 
-    var item = find(li.dataset.id);
-    if (!item) return;
-
-    if (e.target.classList.contains("delete")) {
-      items = items.filter(function (i) { return i.id !== item.id; });
-    } else if (e.target.classList.contains("name") || e.target.type === "checkbox") {
-      item.done = !item.done;
-    } else {
+    if (error) {
+      showError(`추가하지 못했습니다: ${error.message}`);
+      input.value = name;
       return;
     }
 
-    save();
+    clearError();
+    items.push(data);
     render();
   });
 
-  clearBtn.addEventListener("click", function () {
-    items = items.filter(function (i) { return !i.done; });
-    save();
+  list.addEventListener("click", async (e) => {
+    const li = e.target.closest("li");
+    if (!li || !ready) return;
+
+    const item = items.find((i) => i.id === li.dataset.id);
+    if (!item) return;
+
+    if (e.target.classList.contains("delete")) {
+      const removed = items;
+      items = items.filter((i) => i.id !== item.id);
+      render();
+
+      const { error } = await db.from(TABLE).delete().eq("id", item.id);
+      if (error) {
+        items = removed;
+        render();
+        showError(`삭제하지 못했습니다: ${error.message}`);
+        return;
+      }
+      clearError();
+      return;
+    }
+
+    if (e.target.classList.contains("name") || e.target.type === "checkbox") {
+      const next = !item.done;
+      item.done = next;
+      render();
+
+      const { error } = await db.from(TABLE).update({ done: next }).eq("id", item.id);
+      if (error) {
+        item.done = !next;
+        render();
+        showError(`상태를 바꾸지 못했습니다: ${error.message}`);
+        return;
+      }
+      clearError();
+    }
+  });
+
+  clearBtn.addEventListener("click", async () => {
+    if (!ready) return;
+
+    const doneIds = items.filter((i) => i.done).map((i) => i.id);
+    if (!doneIds.length) return;
+
+    const kept = items;
+    items = items.filter((i) => !i.done);
     render();
+
+    const { error } = await db.from(TABLE).delete().in("id", doneIds);
+    if (error) {
+      items = kept;
+      render();
+      showError(`비우지 못했습니다: ${error.message}`);
+      return;
+    }
+    clearError();
   });
 
   render();
+  start();
 })();
 </script>
 
