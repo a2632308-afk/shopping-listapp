@@ -54,11 +54,79 @@
   }
 
   header {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
     padding: 24px 24px 20px;
     border-bottom: 1px solid var(--border);
   }
+  .titles { flex: 1; min-width: 0; }
   h1 { margin: 0 0 4px; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
   .summary { margin: 0; font-size: 14px; color: var(--muted); }
+
+  .account {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 5px;
+    max-width: 46%;
+  }
+  #who {
+    font-size: 12px;
+    color: var(--muted);
+    text-align: right;
+    word-break: break-all;
+  }
+  .link {
+    padding: 0;
+    font: inherit;
+    font-size: 13px;
+    color: var(--accent);
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .link[hidden] { display: none; }
+
+  #authPanel {
+    padding: 16px 24px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  #authPanel[hidden] { display: none; }
+  .auth-row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .auth-row input {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 14px;
+    color: var(--text);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .auth-row input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .auth-actions { display: flex; gap: 8px; }
+  .auth-actions button {
+    flex: 1;
+    padding: 9px 12px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  #loginBtn { color: #fff; background: var(--accent); border: none; }
+  #signupBtn { color: var(--accent); background: none; border: 1px solid var(--accent); }
+  .auth-actions button:disabled { opacity: .55; cursor: not-allowed; }
+  .hint { margin: 9px 0 0; font-size: 12px; color: var(--muted); }
 
   #status {
     padding: 11px 24px;
@@ -184,9 +252,30 @@
 
 <div class="app">
   <header>
-    <h1>🛒 쇼핑 리스트</h1>
-    <p class="summary" id="summary">불러오는 중…</p>
+    <div class="titles">
+      <h1>🛒 쇼핑 리스트</h1>
+      <p class="summary" id="summary">불러오는 중…</p>
+    </div>
+    <div class="account">
+      <span id="who"></span>
+      <button type="button" class="link" id="authToggle" hidden>로그인 / 가입</button>
+      <button type="button" class="link" id="logout" hidden>로그아웃</button>
+    </div>
   </header>
+
+  <div id="authPanel" hidden>
+    <div class="auth-row">
+      <input id="email" type="email" placeholder="이메일" autocomplete="email">
+    </div>
+    <div class="auth-row">
+      <input id="password" type="password" placeholder="비밀번호 (6자 이상)" autocomplete="current-password">
+    </div>
+    <div class="auth-actions">
+      <button type="button" id="loginBtn">로그인</button>
+      <button type="button" id="signupBtn">가입하기</button>
+    </div>
+    <p class="hint" id="authHint"></p>
+  </div>
 
   <p id="status" role="alert" hidden></p>
 
@@ -229,8 +318,19 @@
   const status = document.getElementById("status");
   const clearBtn = document.getElementById("clear");
 
+  const who = document.getElementById("who");
+  const authToggle = document.getElementById("authToggle");
+  const logoutBtn = document.getElementById("logout");
+  const authPanel = document.getElementById("authPanel");
+  const emailInput = document.getElementById("email");
+  const passwordInput = document.getElementById("password");
+  const loginBtn = document.getElementById("loginBtn");
+  const signupBtn = document.getElementById("signupBtn");
+  const authHint = document.getElementById("authHint");
+
   let items = [];
   let ready = false;
+  let user = null;
 
   function showError(message) {
     status.textContent = message;
@@ -283,6 +383,8 @@
     summary.textContent = total === 0
       ? "항목이 없습니다"
       : `전체 ${total}개 · 담음 ${done}개 · 남음 ${total - done}개`;
+
+    renderAccount();
   }
 
   async function fetchItems() {
@@ -317,12 +419,46 @@
     localStorage.setItem(MIGRATED_KEY, "1");
   }
 
+  // 로그인 상태에 따라 헤더의 계정 영역과 안내 문구를 갱신한다.
+  function renderAccount() {
+    if (!ready) {           // 인증·로드가 끝나기 전에는 계정 영역을 노출하지 않는다.
+      who.textContent = "";
+      authToggle.hidden = true;
+      logoutBtn.hidden = true;
+      return;
+    }
+
+    const guest = !user || user.is_anonymous;
+    who.textContent = guest ? "게스트 · 이 브라우저에만 저장됨" : user.email;
+    authToggle.hidden = !guest;
+    logoutBtn.hidden = guest;
+    if (guest) {
+      authHint.textContent = items.length
+        ? `가입하면 지금 목록 ${items.length}개가 계정으로 함께 옮겨집니다. 로그인하면 해당 계정의 목록으로 바뀝니다.`
+        : "가입하면 어느 브라우저·기기에서든 같은 목록을 볼 수 있습니다.";
+    }
+  }
+
+  async function reload() {
+    await fetchItems();
+    render();
+    renderAccount();
+  }
+
+  function authBusy(on) {
+    loginBtn.disabled = on;
+    signupBtn.disabled = on;
+  }
+
   async function start() {
     try {
       const { data: { session } } = await db.auth.getSession();
+      user = session?.user ?? null;
+
       if (!session) {
-        const { error } = await db.auth.signInAnonymously();
+        const { data, error } = await db.auth.signInAnonymously();
         if (error) throw error;
+        user = data.user;
       }
 
       await migrateLegacyItems();
@@ -331,6 +467,7 @@
       setEnabled(true);
       clearError();
       render();
+      renderAccount();
       input.focus();
     } catch (err) {
       setEnabled(false);
@@ -338,6 +475,83 @@
       showError(`서버에 연결하지 못했습니다: ${err.message ?? err}`);
     }
   }
+
+  authToggle.addEventListener("click", () => {
+    authPanel.hidden = !authPanel.hidden;
+    if (!authPanel.hidden) emailInput.focus();
+  });
+
+  // 가입: 현재 게스트라면 그 익명 계정을 그대로 승격시켜 기존 목록을 유지한다.
+  signupBtn.addEventListener("click", async () => {
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+    if (!email || !password) {
+      showError("이메일과 비밀번호를 모두 입력하세요.");
+      return;
+    }
+
+    authBusy(true);
+    try {
+      if (user?.is_anonymous) {
+        const { data, error } = await db.auth.updateUser({ email, password });
+        if (error) throw error;
+        user = data.user;
+      } else {
+        const { data, error } = await db.auth.signUp({ email, password });
+        if (error) throw error;
+        user = data.user;
+      }
+      authPanel.hidden = true;
+      passwordInput.value = "";
+      clearError();
+      await reload();
+    } catch (err) {
+      showError(`가입하지 못했습니다: ${err.message ?? err}`);
+    } finally {
+      authBusy(false);
+    }
+  });
+
+  loginBtn.addEventListener("click", async () => {
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+    if (!email || !password) {
+      showError("이메일과 비밀번호를 모두 입력하세요.");
+      return;
+    }
+
+    authBusy(true);
+    try {
+      const { data, error } = await db.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      user = data.user;
+      authPanel.hidden = true;
+      passwordInput.value = "";
+      clearError();
+      await reload();
+    } catch (err) {
+      showError(`로그인하지 못했습니다: ${err.message ?? err}`);
+    } finally {
+      authBusy(false);
+    }
+  });
+
+  // 로그아웃 후에도 앱을 쓸 수 있도록 곧바로 새 게스트 세션을 만든다.
+  logoutBtn.addEventListener("click", async () => {
+    setEnabled(false);
+    try {
+      await db.auth.signOut();
+      const { data, error } = await db.auth.signInAnonymously();
+      if (error) throw error;
+      user = data.user;
+      clearError();
+      // 계정 영역은 ready 가 true 일 때만 그려지므로 reload 보다 먼저 켠다.
+      setEnabled(true);
+      await reload();
+    } catch (err) {
+      showError(`로그아웃 처리 중 문제가 발생했습니다: ${err.message ?? err}`);
+    }
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
